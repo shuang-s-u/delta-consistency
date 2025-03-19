@@ -46,6 +46,7 @@ training:
     max_grad_norm: 10.0
     priority_alpha: 1
     weight_decay: 0.0
+
     start_after_epochs: 5
     steps_first_epoch: 400
     steps_per_epoch: 200
@@ -56,15 +57,18 @@ training:
     max_grad_norm: 10.0
     priority_alpha: 1
     weight_decay: 0.01
+
     start_after_epochs: 50
     steps_first_epoch: 120
     steps_per_epoch: 120
+    
   actor_critic:
     sequence_length: ${eval:'${params.actor_critic.burn_in_length} + 1'}
     batch_num_samples: 64
     grad_acc_steps: 1
     max_grad_norm: 10.0
     priority_alpha: 1
+    
     start_after_epochs: 75
     steps_per_epoch: 200
 

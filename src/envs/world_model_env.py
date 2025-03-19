@@ -16,7 +16,9 @@ from utils import compute_softmax_over_buckets, symexp
 
 @dataclass
 class WorldModelEnvOutput:
+    # 当前模型的观测值
     frames: torch.FloatTensor
+    # 
     wm_output_sequence: torch.FloatTensor
 
 
@@ -40,6 +42,7 @@ class WorldModelEnv:
 
     @torch.no_grad()
     def reset_from_past(self, obs: torch.FloatTensor, act: torch.LongTensor) -> Tuple[WorldModelEnvOutput, WorldModelEnvOutput]:
+        # (B, T, C, H, W)，过去 T 个时间步的观测值（图像）。 act: (B, T-1)，过去 T-1 个时间步的离散动作。
         self.obs = obs[:, -1:]
         self.x = None
         self.last_latent_token_emb = None
@@ -48,7 +51,9 @@ class WorldModelEnv:
         latent_tokens = self.tokenizer.burn_in(obs, act)
         wm_output_sequence = self.world_model.burn_in(obs, act, latent_tokens, use_kv_cache=True)
 
+        # B, T-1, C, H, W)，用于策略训练的观测序列（不包含最后一个）。
         obs_burn_in_policy = WorldModelEnvOutput(obs[:, :-1], wm_output_sequence[:, :-1]) 
+        # (B, 1, C, H, W)，世界模型在 burn-in 结束后得到的最新观测。
         first_obs = WorldModelEnvOutput(obs[:, -1:], wm_output_sequence[:, -1:])
 
         return obs_burn_in_policy, first_obs  
@@ -84,6 +89,7 @@ class WorldModelEnv:
 
         latent_tokens = []
 
+        # 1024
         latent_token = Categorical(logits=outputs_wm.logits_latents).sample()
         latent_tokens.append(latent_token)
 
@@ -95,6 +101,7 @@ class WorldModelEnv:
             latent_token = Categorical(logits=outputs_wm.logits_latents).sample()
             latent_tokens.append(latent_token)
 
+    
         self.last_latent_token_emb = self.world_model.latents_emb(latent_token)
 
         q = self.tokenizer.quantizer.embed_tokens(torch.stack(latent_tokens, dim=-1))
@@ -105,6 +112,7 @@ class WorldModelEnv:
             should_clamp=True
         )
 
+        # 更新潜在连续帧
         self.x = rearrange(self.world_model.frame_cnn(self.obs), 'b 1 k e -> b k e')
 
         obs = WorldModelEnvOutput(frames=self.obs, wm_output_sequence=torch.cat(wm_output_sequence, dim=1))

@@ -6,13 +6,18 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
 @dataclass
 class FrameCnnConfig:
+    # 7
     image_channels: int
+    # 64
     latent_dim: int
+
+    # 64
     num_channels: int
+    # [1, 1, 2, 2, 4]
     mult: List[int]
+    # [1, 0, 1, 1, 0]
     down: List[int]
 
 
@@ -21,6 +26,7 @@ class FrameEncoder(nn.Module):
         super().__init__()
 
         assert len(config.mult) == len(config.down)
+        # padding=1，保持输出尺寸不变（H × W 不变）。
         encoder_layers = [nn.Conv2d(config.image_channels, config.num_channels, kernel_size=3, stride=1, padding=1)]
         input_channels = config.num_channels
 
@@ -31,8 +37,10 @@ class FrameEncoder(nn.Module):
             if d:
                 encoder_layers.append(Downsample(output_channels))
         encoder_layers.extend([
+            # 归一化，提升训练稳定性。
             nn.GroupNorm(num_groups=32, num_channels=input_channels),
             nn.SiLU(inplace=True),
+            # 最终卷积，将 input_channels（可能是 256）压缩到 latent_dim（如 64）。
             nn.Conv2d(input_channels, config.latent_dim, kernel_size=3, stride=1, padding=1)
         ])
         self.encoder = nn.Sequential(*encoder_layers)
@@ -41,6 +49,8 @@ class FrameEncoder(nn.Module):
         b, t, _, _, _ = x.size()
         x = rearrange(x, 'b t c h w -> (b t) c h w')
         x = self.encoder(x)
+        # x.shape = (b, t, 64, 8, 8)
+        # 恢复批次和时间步维度： (b, t, latent_dim, h', w')
         x = rearrange(x, '(b t) c h w -> b t c h w', b=b, t=t)
 
         return x

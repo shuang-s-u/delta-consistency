@@ -48,6 +48,7 @@ class CnnLstmActorCritic(nn.Module):
 
     @torch.no_grad()
     def burn_in(self, wm_env_output: WorldModelEnvOutput) -> None:
+        # 向前传播但是不保留梯度
         _ = self(wm_env_output)
 
     def build_present_input_from_past(self, past_obs) -> torch.LongTensor:

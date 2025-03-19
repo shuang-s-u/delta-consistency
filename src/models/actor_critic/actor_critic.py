@@ -22,6 +22,8 @@ from utils import compute_mask_after_first_done, compute_softmax_over_buckets, L
 class ActorCriticConfig:
     burn_in_length: int
     imagination_horizon: int
+    # gamma: 折扣因子（用于 TD 计算）。
+    # lambda_: 用于 λ-return（TD(λ) 方法）。
     gamma: float
     lambda_: float
     entropy_weight: float
@@ -51,11 +53,13 @@ class ActorCritic(nn.Module):
 
     @property
     def past_obs(self) -> torch.FloatTensor:
+        # 以 torch.stack 形式返回。
         return torch.stack(list(self._past_obs), dim=1)
 
     def reset(self, n: int) -> None:
         self.model.reset(n)
         self.target_model.reset(n)
+        # 设置past_obs的队列长度
         maxlen = self.config.burn_in_length + self.config.imagination_horizon
         self._past_obs = deque(maxlen=maxlen)
 
@@ -67,6 +71,7 @@ class ActorCritic(nn.Module):
     def update_target(self) -> None:
         source_state_dict = self.model.state_dict()
         target_state_dict = self.target_model.state_dict()
+        # 使用 Polyak Averaging (TAU=0.995) 平滑更新 target_model。
         TAU = 0.995
         for key in source_state_dict:
             target_state_dict[key] = source_state_dict[key] * (1 - TAU) + target_state_dict[key] * TAU
@@ -75,11 +80,15 @@ class ActorCritic(nn.Module):
     def act(self, obs: torch.FloatTensor, should_sample: bool = True, temperature: float = 1.0) -> Tuple[torch.LongTensor, torch.FloatTensor]:
         self._past_obs.append(obs)
 
+        # 构建LSTM输入
         inputs = self.model.build_present_input_from_past(self.past_obs)        
         outputs = self.model(inputs)
 
+        # logits_actions 是一个形状为 (batch_size, seq_len, num_actions) 的张量，其中 seq_len 是序列的长度（即时间步数），
+        # 取最后一个时间步的action
         logits_actions = outputs.logits_actions[:, -1]
         act_token = Categorical(logits=logits_actions / temperature).sample() if should_sample else logits_actions.argmax(dim=-1)
+        #  two-hot 值估计/直接取值
         value = symexp(compute_softmax_over_buckets(outputs.logits_values[:, -1])) if self.config.two_hot_rets else outputs.logits_values[:, -1, 0]  
 
         return act_token, value

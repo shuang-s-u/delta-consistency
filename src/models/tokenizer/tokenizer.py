@@ -12,12 +12,48 @@ from .quantizer import Quantizer, QuantizerOutput
 from utils import init_weights, LossWithIntermediateLosses
 
 
+'''
+tokenizer:
+  _target_: models.tokenizer.TokenizerConfig
+  image_channels: 3
+  image_size: 64
+  num_actions: null
+  num_tokens: 4
+  decoder_act_channels: 4
+  codebook_size: 1024
+  codebook_dim: 64
+  max_codebook_updates_with_revival: ${params.training.tokenizer.steps_first_epoch}
+  encoder_config:
+    image_channels: ${eval:'${..image_channels} * 2 + 1'}
+    latent_dim: 64
+    num_channels: 64
+    mult: [1, 1, 2, 2, 4]
+    down: [1, 0, 1, 1, 0]
+  decoder_config:
+    image_channels: ${..image_channels}
+    latent_dim: ${eval:'${..frame_cnn_config.latent_dim} + ${..decoder_act_channels} + ${..encoder_config.latent_dim}'}
+    num_channels: 64
+    mult: [1, 1, 2, 2, 4]
+    down: [1, 0, 1, 1, 0]
+  frame_cnn_config:
+    image_channels: ${..image_channels}
+    latent_dim: 16
+    num_channels: 32
+    mult: [1, 1, 2, 2, 4]
+    down: [1, 0, 1, 1, 0]
+'''
+
 @dataclass
 class TokenizerConfig:
+    # 3
     image_channels: int
+    # 64
     image_size: int
+    # null
     num_actions: int
+    # 4
     num_tokens: int
+    # 4
     decoder_act_channels: int
     codebook_size: int
     codebook_dim: int
@@ -32,6 +68,8 @@ class Tokenizer(nn.Module):
         super().__init__()
         self.config = config
 
+
+        # down: [1, 0, 1, 1, 0] -》 64/8 = 8
         self.latent_res = config.image_size // 2 ** sum(config.encoder_config.down)
         self.tokens_grid_res = int(math.sqrt(config.num_tokens))
         self.token_res = self.latent_res // self.tokens_grid_res
@@ -82,15 +120,20 @@ class Tokenizer(nn.Module):
 
     def encode(self, x1: torch.FloatTensor, a: torch.LongTensor, x2: torch.FloatTensor) -> torch.FloatTensor:
         a_emb = rearrange(self.encoder_act_emb(a), 'b t (h w) -> b t 1 h w', h=x1.size(3))
+        # (b, t, c1 + 1 + c2, h, w)
         encoder_input = torch.cat((x1, a_emb, x2), dim=2)
+        # z.shape = (b, t, 64, 8, 8)
         z = self.encoder(encoder_input)
 
         return z
 
     def decode(self, x1: torch.FloatTensor, a: torch.LongTensor, q2: torch.FloatTensor, should_clamp: bool = False) -> torch.FloatTensor:
+        # x1_emb.shape = (b, t, 16, 8, 8)
         x1_emb = self.frame_cnn(x1)
+        # a_emb.shape = (b, t, 4, 8, 8)
         a_emb = rearrange(self.decoder_act_emb(a), 'b t (c h w) -> b t c h w', c=self.config.decoder_act_channels, h=x1_emb.size(3))
 
+        # (b, t, )
         decoder_input = torch.cat((x1_emb, a_emb, q2), dim=2)
 
         r = self.decoder(decoder_input)

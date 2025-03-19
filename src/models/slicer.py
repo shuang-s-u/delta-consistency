@@ -23,7 +23,8 @@ class Slicer(nn.Module):
     def forward(self, *args, **kwargs):
         raise NotImplementedError
 
-
+# Head 是一个继承自 Slicer 的模块，它的主要功能是根据给定的 block_mask 
+# 计算哪些 token 被保留，然后通过 head_module 对输入 x 进行处理。
 class Head(Slicer):
     def __init__(self, max_blocks: int, block_mask: torch.Tensor, head_module: nn.Module) -> None:
         super().__init__(max_blocks, block_mask)
@@ -34,7 +35,7 @@ class Head(Slicer):
         x_sliced = x[:, self.compute_slice(num_steps, prev_steps)]  # x is (B, T, E)
         return self.head_module(x_sliced)
 
-
+# 
 class Embedder(nn.Module):
     def __init__(self, max_blocks: int, block_masks: List[torch.Tensor], embedding_tables: List[nn.Embedding]) -> None:
         super().__init__()

@@ -4,7 +4,7 @@ defaults:
   - params: crafter
 
 wandb:
-  mode: online
+  mode: offline
   project: delta-iris
   entity: null
   name: null

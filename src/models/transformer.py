@@ -12,6 +12,25 @@ import torch.nn as nn
 from .kv_caching import KeysValues, KVCache
 
 
+'''
+  transformer_config:
+    _target_: models.transformer.TransformerConfig
+
+    tokens_per_block: ${eval:'1 + 1 + 4'}
+    # 26
+    max_blocks: ${params.training.world_model.sequence_length}
+
+    num_layers: 3
+    num_heads: 4
+    embed_dim: 256
+
+    attention: causal
+
+    embed_pdrop: 0.0
+    resid_pdrop: 0.0
+    attn_pdrop: 0.0
+'''
+
 @dataclass
 class TransformerConfig:
 
@@ -62,7 +81,16 @@ class TransformerEncoder(nn.Module):
         self.keys_values = KeysValues(n, self.config.max_tokens, self.config.embed_dim, self.config.num_layers, device)
 
     def forward(self, x: torch.FloatTensor, use_kv_cache: bool = False) -> torch.FloatTensor:
-        assert x.ndim == 3 and x.size(2) == self.config.embed_dim   # (B, TK, E)
+        assert x.ndim == 3 and x.size(2) == self.config.embed_dim   # (B, TK, E) b (t p1k) e
+
+
+        # training world model
+        ###### sequence input.shape(x).shape is torch.Size([64, 156, 256]) or torch.Size([64, 156, 256]
+        ###### output of transformer(y).shape is torch.Size([64, 156, 256])
+        # training actor- critic
+        # sequence input.shape(x).shape is torch.Size([64, 1, 256]) or torch.Size([64, 1, 256])
+        ###### sequence input.shape(x).shape is torch.Size([64, 3, 256]) or torch.Size([64, 3, 256])
+        ###### output of transformer(y).shape is torch.Size([64, 3, 256])
 
         prev_steps = self.keys_values.size if use_kv_cache else 0
         inputs = x + self.pos_emb(prev_steps + torch.arange(x.size(1), device=x.device))
@@ -71,6 +99,13 @@ class TransformerEncoder(nn.Module):
         for i, block in enumerate(self.blocks):
             y = block(y, self.keys_values[i] if use_kv_cache else None)
         y = self.ln(y)
+
+        # output of transformer(y).shape is torch.Size([64, 1, 256])
+
+
+        # print(f'###############transformer:#################')
+        # print(f'###### sequence input.shape(x).shape is {x.shape} or {inputs.shape}')
+        # print(f'###### output of transformer(y).shape is {y.shape}')
 
         return y
 

@@ -8,10 +8,14 @@ import torch.nn.functional as F
 
 from .convnet import FrameCnnConfig, FrameEncoder
 from data import Batch
-from .slicer import  Head
+
+from models.consistency_model import ConsistencyModel, ConsistencyModelConfig, ConsistencySampler, ConsistencySamplerConfig
+from models.consistency_model import ConsistencyModel, ConsistencyModelConfig, ConsistencySampler, ConsistencySamplerConfig
 from .tokenizer import Tokenizer
-from .transformer import TransformerEncoder, TransformerConfig
 from utils import init_weights, LossWithIntermediateLosses, symlog, two_hot
+from .slicer import  Head
+
+from .transformer import TransformerEncoder, TransformerConfig
 
 
 @dataclass
@@ -24,15 +28,19 @@ class WorldModelOutput:
 
 @dataclass
 class WorldModelConfig:
+    # == codebook_size: 1024 
     latent_vocab_size: int
     num_actions: int
     image_channels: int
     image_size: int
+
     latents_weight: float
     rewards_weight: float
     ends_weight: float
+
     two_hot_rews: bool
-    transformer_config: TransformerConfig
+    consistency_model_config: ConsistencyModelConfig
+    # transformer_config: TransformerConfig
     frame_cnn_config: FrameCnnConfig
 
 
@@ -40,19 +48,31 @@ class WorldModel(nn.Module):
     def __init__(self, config: WorldModelConfig) -> None:
         super().__init__()
         self.config = config
-        self.transformer = TransformerEncoder(config.transformer_config)
+        self.consistency_model = ConsistencyModel(config.consistency_model_config)
+        # 确保i-frames的image_size和tokenizer后的delta-frames一样（64,8,8）
+        assert config.image_size // 2 ** sum(config.frame_cnn_config.down) == config.latent_image_size
 
+
+        # self.transformer = TransformerEncoder(config.transformer_config)
+
+        # 确保图像编码后的维度（将通道* h * w之后的）与Transformer的输入维度匹配
         assert ((config.image_size // 2 ** sum(config.frame_cnn_config.down)) ** 2) * config.frame_cnn_config.latent_dim == config.transformer_config.embed_dim
+        # 图像编码器（CNN + 维度重排 + LayerNorm）
+        # 转为 (batch, time, 1, height*width*channels)）。
         self.frame_cnn = nn.Sequential(FrameEncoder(config.frame_cnn_config), Rearrange('b t c h w -> b t 1 (h w c)'), nn.LayerNorm(config.transformer_config.embed_dim))
 
+        # 动作和Δ-tokens的嵌入层
+        # self.encoder_act_emb = nn.Embedding(config.num_actions, config.image_size ** 2)
         self.act_emb = nn.Embedding(config.num_actions, config.transformer_config.embed_dim)
         self.latents_emb = nn.Embedding(config.latent_vocab_size, config.transformer_config.embed_dim)
 
+        # 定义动作和Δ-tokens在序列中的位置掩码
         act_pattern = torch.zeros(config.transformer_config.tokens_per_block)
         act_pattern[1] = 1
         act_and_latents_but_last_pattern = torch.zeros(config.transformer_config.tokens_per_block) 
         act_and_latents_but_last_pattern[1:-1] = 1
 
+        # 定义三个预测头：Δ-tokens、奖励、终止信号
         self.head_latents = Head(
             max_blocks=config.transformer_config.max_blocks,
             block_mask=act_and_latents_but_last_pattern,
@@ -98,23 +118,39 @@ class WorldModel(nn.Module):
         return WorldModelOutput(outputs, logits_latents, logits_rewards, logits_ends)
 
     def compute_loss(self, batch: Batch, tokenizer: Tokenizer, **kwargs) -> LossWithIntermediateLosses:
+        # batch.ends 是一个 (B, T) 形状的张量， 约束每个 batch 内最多只有 1 个 episode 终止点，防止错误数据输入
         assert torch.all(batch.ends.sum(dim=1) <= 1)
 
         with torch.no_grad():
+            # batch.observations = [64, 26, 3, 64, 64])  batch.actions = [64, 26]
             latent_tokens = tokenizer(batch.observations[:, :-1], batch.actions[:, :-1], batch.observations[:, 1:]).tokens
 
+        # k个latent token
+        # [64, 25, 4]
         b, _, k = latent_tokens.size()
 
+        # [64, 26, 1, 256]
         frames_emb = self.frame_cnn(batch.observations)
+        # act_emb 是一个动作嵌入层，把 离散动作 变成 embedding 表示。
+        # self.act_emb = nn.Embedding(config.num_actions, config.transformer_config.embed_dim)
         act_tokens_emb = self.act_emb(rearrange(batch.actions, 'b t -> b t 1'))
+        # 补齐 latent_tokens 维度，使得 latent_tokens_emb 的时间步长度与 frames_emb 对齐。
+        # self.latents_emb = nn.Embedding(config.latent_vocab_size, config.transformer_config.embed_dim)
         latent_tokens_emb = self.latents_emb(torch.cat((latent_tokens, latent_tokens.new_zeros(b, 1, k)), dim=1))
+        # 在token维度上进行拼接，然后展开成一个长序列 (batch_size, sequence_length, embedding_dim)
         sequence = rearrange(torch.cat((frames_emb, act_tokens_emb, latent_tokens_emb), dim=2), 'b t p1k e -> b (t p1k) e')
   
         outputs = self(sequence)
 
+        # 取出 有效时间步的 mask，防止计算 padding 位置的损失。
         mask = batch.mask_padding
 
+        # [64, 25, 4] -> # labels_latents.shape = sum(mask == ture)
         labels_latents = latent_tokens[mask[:, :-1]].flatten()
+        # repeat作用： 在 K 维上扩展，使其形状变为 (B, (T-1) * K)。
+        # outputs.logits_latents.shape = (b=64, (T * K) = 26*4 )
+        # outputs.logits_latents.shape is torch.Size([64, 104, 1024])，
+        # logits_latents.shape = (sum(mask == ture), e)
         logits_latents = outputs.logits_latents[:, :-k][repeat(mask[:, :-1], 'b t -> b (t k)', k=k)]
         latent_acc = (logits_latents.max(dim=-1)[1] == labels_latents).float().mean()
         labels_rewards = two_hot(symlog(batch.rewards)) if self.config.two_hot_rews else (batch.rewards.sign() + 1).long()
@@ -122,6 +158,14 @@ class WorldModel(nn.Module):
         loss_latents = F.cross_entropy(logits_latents, target=labels_latents) * self.config.latents_weight
         loss_rewards = F.cross_entropy(outputs.logits_rewards[mask], target=labels_rewards[mask]) * self.config.rewards_weight
         loss_ends = F.cross_entropy(outputs.logits_ends[mask], target=batch.ends[mask]) * self.config.ends_weight
+
+
+        # print(f'###############frames_emb.shape is {frames_emb.shape}')
+        # print(f'###############latent_tokens.shape is {latent_tokens.shape}')     
+        # print(f'###############batch.observations.shape is {batch.observations.shape} and batch.actions.shape is {batch.actions.shape}')
+        # print(f'#############labels_latents.shape is {labels_latents.shape}')
+        # print(f'#############outputs.logits_latents.shape is {outputs.logits_latents.shape}')
+        # print(f'#############logits_latents.shape is {logits_latents.shape}')
 
         return LossWithIntermediateLosses(loss_latents=loss_latents, loss_rewards=loss_rewards, loss_ends=loss_ends), {'latent_accuracy': latent_acc}
 
