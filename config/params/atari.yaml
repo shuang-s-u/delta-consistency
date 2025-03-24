@@ -1,6 +1,6 @@
 common:
   epochs: 600
-  device: cuda:0
+  device: cuda:5
   do_checkpoint: true
   seed: null
   resume: false
@@ -58,7 +58,7 @@ training:
     priority_alpha: 1
     weight_decay: 0.01
 
-    start_after_epochs: 50
+    start_after_epochs: 6
     steps_first_epoch: 120
     steps_per_epoch: 120
     
@@ -69,7 +69,7 @@ training:
     max_grad_norm: 10.0
     priority_alpha: 1
     
-    start_after_epochs: 75
+    start_after_epochs: 6
     steps_per_epoch: 200
 
 evaluation:
@@ -119,7 +119,10 @@ tokenizer:
 
 world_model:
   _target_: models.world_model.WorldModelConfig
-  latent_vocab_size: ${params.tokenizer.codebook_size}
+  # latent_vocab_size: ${params.tokenizer.codebook_size}
+  latent_image_size: 8
+  latent_image_channels: 64
+
   num_actions: null
   image_channels: ${params.tokenizer.image_channels}
   image_size: ${params.tokenizer.image_size}
@@ -127,17 +130,61 @@ world_model:
   rewards_weight: 1.0
   ends_weight: 0.1
   two_hot_rews: false
-  transformer_config:
-    _target_: models.transformer.TransformerConfig
-    tokens_per_block: ${eval:'1 + 1 + 4'}
-    max_blocks: ${params.training.world_model.sequence_length}
-    num_layers: 3
-    num_heads: 4
-    embed_dim: 256
-    attention: causal
-    embed_pdrop: 0.0
-    resid_pdrop: 0.0
-    attn_pdrop: 0.0
+  lambda_consistency: 1.0
+  lambda_prediction: 1.0
+
+  consistency_model_config:
+    _target_: models.consistency.ConsistencyModelConfig
+    # total_training_steps: 10000
+    sigma_min: 0.002
+    sigma_max: 80.0
+    sigma_data: 0.5
+    sigma_offset_noise: 0.3
+    rho: 7.0
+    initial_timesteps:  10
+    final_timesteps:  1280
+    lognormal_mean: -1.1
+    lognormal_std: 2.0
+
+    inner_model:
+      _target_: models.consistency.InnerModelConfig
+      # img_channels: 3
+      # num_steps_conditioning: 4
+      # cond_channels: 256
+      # depths: [2,2,2,2]
+      # channels: [64,64,64,64]
+      # attn_depths: [0,0,0,0]
+      img_channels: 64  # 输入图像通道数
+      num_steps_conditioning: 4  # 条件时间步数，根据实际情况调整
+      cond_channels: 256  # 条件向量维度
+      depths: [2, 2]  # 两次下采样，对应两个处理阶段
+      channels: [512, 512]  # 初始通道256，下采样后512，最后512
+      attn_depths: [0, 0]  # 在第二阶段使用注意力
+      num_actions: null  # 动作类别数，根据实际情况调整
+  
+  consistency_sampler_config:
+    _target_: models.consistency.ConsistencySamplerConfig
+    sigma_min: 0.002
+    sigma_max: 80.0
+    num_steps_denoising: 3
+    # 是否展示采样进度条
+    verbose: False
+  
+
+
+
+
+  # transformer_config:
+  #   _target_: models.transformer.TransformerConfig
+  #   tokens_per_block: ${eval:'1 + 1 + 4'}
+  #   max_blocks: ${params.training.world_model.sequence_length}
+  #   num_layers: 3
+  #   num_heads: 4
+  #   embed_dim: 256
+  #   attention: causal
+  #   embed_pdrop: 0.0
+  #   resid_pdrop: 0.0
+  #   attn_pdrop: 0.0
   frame_cnn_config:
     image_channels: ${..image_channels}
     latent_dim: 4
@@ -147,7 +194,7 @@ world_model:
 
 actor_critic:
   _target_: models.actor_critic.ActorCriticConfig
-  burn_in_length: 5
+  burn_in_length: 8
   imagination_horizon: 20
   gamma: 0.995
   lambda_: 0.95

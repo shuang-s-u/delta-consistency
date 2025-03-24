@@ -37,7 +37,7 @@ def generate_reconstructions_with_tokenizer(batch, tokenizer):
     rec_frames = tensor_to_np_frames(rearrange(r, 'b t c h w -> b t h w c'))
     return rec_frames
 
-
+# 可能需要改动
 @torch.no_grad()
 def reconstruct_through_tokenizer(obs, act, tokenizer):
     check_float_btw_0_1(obs)

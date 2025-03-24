@@ -18,6 +18,15 @@ from ..world_model import WorldModel
 from utils import compute_mask_after_first_done, compute_softmax_over_buckets, LossWithIntermediateLosses, symexp, symlog, two_hot
 
 
+'''
+  _target_: models.actor_critic.ActorCriticConfig
+  burn_in_length: 5
+  imagination_horizon: 20
+  gamma: 0.995
+  lambda_: 0.95
+  entropy_weight: 0.002
+  two_hot_rets: false
+'''
 @dataclass
 class ActorCriticConfig:
     burn_in_length: int
@@ -127,10 +136,12 @@ class ActorCritic(nn.Module):
 
     def imagine(self, batch: Batch, tokenizer: Tokenizer, world_model: WorldModel) -> ImagineOutput:
         mask_padding = batch.mask_padding
+        # 要求是五维度的张量
         assert batch.observations.ndim == 5
         assert mask_padding[:, -1].all()
+        # burn_in_length: 5  6
         assert batch.observations.size(1) == self.config.burn_in_length + 1
-        assert world_model.config.transformer_config.max_blocks >= self.config.burn_in_length + self.config.imagination_horizon + 1
+        # assert world_model.config.transformer_config.max_blocks >= self.config.burn_in_length + self.config.imagination_horizon + 1
 
         wm_env = WorldModelEnv(tokenizer, world_model, self.model.device)
 
@@ -143,6 +154,7 @@ class ActorCritic(nn.Module):
 
         self.reset(n=batch.observations.size(0))
 
+        # 所以是输入6个observations
         obs_burn_in_policy, obs_wm_env = wm_env.reset_from_past(batch.observations, batch.actions[:, :-1])
         self.model.burn_in(obs_burn_in_policy)
         self.target_model.burn_in(obs_burn_in_policy)
@@ -150,12 +162,14 @@ class ActorCritic(nn.Module):
         all_observations = [obs_burn_in_policy, obs_wm_env]
 
         for _ in range(self.config.imagination_horizon):
-            outputs = self.model(obs_wm_env, use_kv_cache=True)
+            outputs = self.model(obs_wm_env)
             action_token = Categorical(logits=outputs.logits_actions).sample()
 
             with torch.no_grad():
-                target_logits_values = self.target_model(obs_wm_env, use_kv_cache=True).logits_values
+                target_logits_values = self.target_model(obs_wm_env).logits_values
 
+            # obs_wm_env = WorldModelEnvOutput(frames=self.obs, wm_output_sequence=next_delta_obs)
+            # action_token = (64, 1)
             obs_wm_env, reward, done, _ = wm_env.step(action_token)
 
             all_observations.append(obs_wm_env)

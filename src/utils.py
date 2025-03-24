@@ -4,6 +4,8 @@ from pathlib import Path
 import random
 import shutil
 from typing import Callable, Dict
+from torch import Tensor
+import math
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -15,6 +17,24 @@ from torch.optim import AdamW
 
 from data import Episode
 
+
+def pseudo_huber_loss(input: Tensor, target: Tensor) -> Tensor:
+    """Computes the pseudo huber loss.
+
+    Parameters
+    ----------
+    input : Tensor
+        Input tensor.
+    target : Tensor
+        Target tensor.
+
+    Returns
+    -------
+    Tensor
+        Pseudo huber loss.
+    """
+    c = 0.00054 * math.sqrt(math.prod(input.shape[1:]))
+    return torch.sqrt((input - target) ** 2 + c**2) - c
 
 def configure_optimizer(model: nn.Module, learning_rate: float, weight_decay: float, *blacklist_module_names) -> AdamW:
     """Credits to https://github.com/karpathy/minGPT"""

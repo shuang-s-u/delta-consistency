@@ -6,6 +6,7 @@ import shutil
 import sys
 import time
 from typing import Dict, Optional
+import os
 
 import hydra
 from hydra.utils import instantiate
@@ -35,6 +36,7 @@ class Trainer:
 
         OmegaConf.resolve(cfg)
         cfg_env_train, cfg_env_test = cfg.env.train, cfg.env.test
+        self.config_env = cfg.env
         cfg = cfg.params
         self.cfg = cfg
         self.device = torch.device(cfg.common.device)
@@ -44,7 +46,8 @@ class Trainer:
 
         num_actions = self.make_envs(cfg_env_train, cfg_env_test)
 
-        cfg.tokenizer.num_actions = cfg.world_model.num_actions = cfg.actor_critic.model.num_actions = num_actions
+        # cfg.tokenizer.num_actions = cfg.world_model.num_actions = cfg.actor_critic.model.num_actions = num_actions
+        cfg.tokenizer.num_actions = cfg.world_model.num_actions = cfg.actor_critic.model.num_actions =cfg.world_model.consistency_model_config.inner_model.num_actions =num_actions
         self.agent = Agent(Tokenizer(instantiate(cfg.tokenizer)), WorldModel(instantiate(cfg.world_model)), ActorCritic(instantiate(cfg.actor_critic))).to(self.device)
 
         self.optimizer_tokenizer = configure_optimizer(self.agent.tokenizer, cfg.training.learning_rate, cfg.training.tokenizer.weight_decay)
@@ -62,6 +65,10 @@ class Trainer:
         self.media_dir = Path('media')
         self.episode_dir = self.media_dir / 'episodes'
         self.reconstructions_dir = self.media_dir / 'reconstructions'
+
+        #
+        self.results_dir = Path(f'results_{self.config_env.train.id}_{self.cfg.world_model.consistency_sampler_config.num_steps_denoising}')
+        #
 
         if self.cfg.collection.path_to_static_dataset is None:
             self.dataset_dir = self.ckpt_dir / 'dataset'
@@ -139,7 +146,26 @@ class Trainer:
             for d in to_log:
                 wandb.log({'epoch': epoch, **d})
 
+            self.save_results_to_file(to_log, epoch)
+
         self.finish()
+
+
+    # todo：将保存到wandb上的数据转到local
+    # 创建保存结果的函数
+    def save_results_to_file(self, to_log, epoch: int):
+        # 获取当前日期和时间
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        os.makedirs(self.results_dir , exist_ok=True)  # 如果 results_ 文件夹不存在，则创建它
+        # 定义文件名和路径，确保保存到 IRIS-MAIN 根目录下
+        file_name = f"log_output_{timestamp}_epoch_{epoch}.txt"
+        file_path = os.path.join(self.results_dir , file_name)
+        
+        # 保存日志数据到文件
+        with open(file_path, 'w') as f:
+            for metrics in to_log:
+                # print('write metrics to local txt')
+                f.write(f"Epoch {epoch}: {metrics}\n")
 
     def train_agent(self, epoch: int) -> None:
         self.agent.train()
@@ -164,6 +190,7 @@ class Trainer:
                 can_sample_beyond_end=True,
                 should_update_counts=(epoch > 1),
                 use_mixed_precision=True,
+                epoch=epoch,
                 **cfg_tokenizer
             )
         self.agent.tokenizer.eval()
@@ -176,6 +203,7 @@ class Trainer:
                 tokenizer=self.agent.tokenizer,
                 should_update_counts=(epoch > 1),
                 use_mixed_precision=True,
+                epoch=epoch,
                 **cfg_world_model
             )
         self.agent.world_model.eval()
@@ -187,6 +215,7 @@ class Trainer:
                 can_sample_beyond_end=False,
                 should_update_counts=(epoch > 1),
                 use_mixed_precision=False,
+                epoch=epoch,
                 tokenizer=self.agent.tokenizer,
                 world_model=self.agent.world_model,
                 **cfg_actor_critic
@@ -208,6 +237,8 @@ class Trainer:
         can_sample_beyond_end: bool,
         should_update_counts: bool,
         use_mixed_precision: bool,
+        epoch: int,
+        start_after_epochs: int,
         **kwargs_loss
         ) -> Dict[str, float]:
 
@@ -224,13 +255,22 @@ class Trainer:
 
         to_log = defaultdict(float)
         optimizer.zero_grad()
+        if isinstance(component, type(self.agent.world_model)):
+            prev_training_steps = (epoch - start_after_epochs) * steps_per_epoch
+            total_training_steps = (self.cfg.common.epochs - start_after_epochs + 1) * steps_per_epoch
 
         with tqdm(total=steps_per_epoch, desc=f'Training {component}', file=sys.stdout) as pbar:
+            # 需要仔细想一下，先不考虑下面的i
             for i, batch in enumerate(loader):
                 
                 batch = batch.to(self.device)
                 with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16 if use_mixed_precision else torch.float32):
-                    losses, metrics = component.compute_loss(batch, **kwargs_loss)
+                    if isinstance(component, type(self.agent.world_model)):
+                        # grad_acc_steps = 1
+                        current_training_step = prev_training_steps + i
+                        losses, metrics = component.compute_loss(batch, current_training_step, total_training_steps, **kwargs_loss)
+                    else:
+                        losses, metrics = component.compute_loss(batch, **kwargs_loss)
                 loss = losses.loss_total / grad_acc_steps
                 loss.backward()
 
@@ -264,10 +304,10 @@ class Trainer:
         cfg_world_model = self.cfg.evaluation.world_model
 
         if epoch > cfg_tokenizer.start_after_epochs:
-            to_log_tokenizer = self.eval_component(self.agent.tokenizer, cfg_tokenizer.batch_num_samples, sequence_length=self.cfg.training.tokenizer.sequence_length)
+            to_log_tokenizer = self.eval_component(self.agent.tokenizer, cfg_tokenizer.batch_num_samples, sequence_length=self.cfg.training.tokenizer.sequence_length, epoch=epoch)
 
         if epoch > cfg_world_model.start_after_epochs:
-            to_log_world_model = self.eval_component(self.agent.world_model, cfg_world_model.batch_num_samples, sequence_length=self.cfg.training.world_model.sequence_length, tokenizer=self.agent.tokenizer)
+            to_log_world_model = self.eval_component(self.agent.world_model, cfg_world_model.batch_num_samples, sequence_length=self.cfg.training.world_model.sequence_length, tokenizer=self.agent.tokenizer, epoch = epoch)
 
         if cfg_tokenizer.save_reconstructions:
             loader = DataLoader(
@@ -281,14 +321,23 @@ class Trainer:
         return to_log_tokenizer, to_log_world_model
 
     @torch.no_grad()
-    def eval_component(self, component: nn.Module, batch_num_samples: int, sequence_length: int, **kwargs_loss) -> Dict[str, float]:
+    def eval_component(self, component: nn.Module, batch_num_samples: int, sequence_length: int, epoch: int, **kwargs_loss) -> Dict[str, float]:
         to_log = defaultdict(float)
         loader = DatasetTraverser(self.test_dataset, batch_num_samples, sequence_length)
 
+        if isinstance(component, type(self.agent.world_model)):
+            start_after_epochs = self.cfg.training.world_model.start_after_epochs
+            steps_per_epoch = self.cfg.training.world_model.steps_per_epoch
+            current_training_step = (epoch - start_after_epochs + 1) * steps_per_epoch
+            total_training_steps = (self.cfg.common.epochs - start_after_epochs + 1) * steps_per_epoch
         for batch in tqdm(loader, desc=f"Evaluating {component}", file=sys.stdout):
             
             batch = batch.to(self.device)
-            losses, metrics = component.compute_loss(batch, **kwargs_loss)
+            if isinstance(component, type(self.agent.world_model)):
+                # grad_acc_steps = 1
+                losses, metrics = component.compute_loss(batch, current_training_step, total_training_steps, **kwargs_loss)
+            else:
+                losses, metrics = component.compute_loss(batch, **kwargs_loss)
 
             for k, v in {**losses.intermediate_losses, **metrics}.items():
                 to_log[f'{component}/eval/{k}'] += v
